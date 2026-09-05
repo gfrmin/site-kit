@@ -1,0 +1,44 @@
+{
+  // Cloudflare Workers config for {{NAME}}. Deploy with `npx wrangler deploy`
+  // (or just push to master — CI does it).
+  //
+  // This is a Workers project, not a Pages project. Cloudflare keeps Pages
+  // supported and fixed, but every new platform feature — static-asset routing,
+  // Workers Logs, gradual deployments, cron, Durable Objects — ships to Workers
+  // only. New sites start where the investment is.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "{{NAME}}",
+  "compatibility_date": "{{COMPAT_DATE}}",
+
+  "assets": {
+    "directory": "./dist",
+
+    // "single-page-application" serves index.html with a 200 for any unmatched
+    // path, which is what makes deep links and refreshes work in a client-routed
+    // app. It is the Workers equivalent of Pages' default SPA fallback.
+    //
+    // If this site is NOT client-routed, change it to "404-page" and add a real
+    // public/404.html. Do not leave it as SPA for a multi-page site: every typo'd
+    // URL would return 200 and search engines would index the shell.
+    "not_found_handling": "single-page-application",
+
+    // Uncomment when adding server code (see main, below): it lets the Worker
+    // read its own static files, e.g. to rewrite OG meta on the HTML shell.
+    // "binding": "ASSETS",
+  },
+
+  // Static-assets-only to start. To add API routes or middleware, write a
+  // Worker entrypoint and point `main` at it:
+  //
+  //   "main": "./src/worker.js",
+  //
+  // and set "run_worker_first" to the routes that must beat the asset handler:
+  //
+  //   "assets": { ..., "run_worker_first": ["/api/*"] }
+
+  "kv_namespaces": [],
+
+  "observability": {
+    "enabled": true,
+  },
+}

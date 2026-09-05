@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""Create a new Cloudflare Workers site end to end.
+
+Replaces the twelve-step ritual documented in docs/NEW-SITE.md, six steps of
+which were previously tribal knowledge scattered across four repos' READMEs and
+workflow comments.
+
+    new-site kana kana.gfrm.in
+    new-site blazon blazon.fyi --kv RATE --kv PURCHASES
+    new-site scratch scratch.gfrm.in --dry-run
+
+Every step is idempotent and says whether it created something or found it
+already there, so a re-run after a failure resumes rather than duplicating.
+
+Credentials come from gnome-keyring (service=env), never from a file or the
+environment. See docs/NEW-SITE.md for which token and why.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any, Callable, Iterable
+
+CF_API = "https://api.cloudflare.com/client/v4"
+TEMPLATE = Path(__file__).resolve().parent.parent / "template"
+GITHUB_OWNER = "gfrmin"
+
+# The token new-site needs, and the permission groups it must carry. Kept here
+# rather than in prose because a wrong-scope token fails with a 403 that reads
+# exactly like a dead key. See docs/NEW-SITE.md § "The deploy token".
+DEPLOY_TOKEN_KEY = "CLOUDFLARE_WORKERS_DEPLOY_TOKEN"
+
+
+# ---------------------------------------------------------------------------
+# shell / keyring
+
+
+def run(
+    *argv: str, cwd: Path | None = None, check: bool = True, capture: bool = True
+) -> str:
+    """Run a command, returning stdout. Raises on non-zero unless check=False."""
+    proc = subprocess.run(
+        argv,
+        cwd=cwd,
+        check=False,
+        text=True,
+        capture_output=capture,
+    )
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise SystemExit(f"! {' '.join(argv)}\n  exit {proc.returncode}: {detail}")
+    return (proc.stdout or "").strip()
+
+
+def secret(key: str) -> str | None:
+    """Read one secret from gnome-keyring. None if absent."""
+    proc = subprocess.run(
+        ("secret-tool", "lookup", "service", "env", "key", key),
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return proc.stdout or None if proc.returncode == 0 and proc.stdout else None
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare API
+
+
+@dataclass(frozen=True)
+class CF:
+    token: str
+    account: str
+
+    def call(
+        self, method: str, path: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        req = urllib.request.Request(
+            f"{CF_API}{path}",
+            method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            payload = exc.read().decode(errors="replace")
+            try:
+                parsed = json.loads(payload)
+            except ValueError:
+                raise SystemExit(f"! CF {method} {path} -> HTTP {exc.code}: {payload}")
+            errors = parsed.get("errors") or []
+            # A 403 on Workers with a Pages-scoped token is the single most
+            # likely failure here, and its message does not say so.
+            hint = (
+                "\n  (403 on a Workers endpoint usually means the token is "
+                "Pages-scoped. See docs/NEW-SITE.md § The deploy token.)"
+                if exc.code == 403
+                else ""
+            )
+            raise SystemExit(
+                f"! CF {method} {path} -> HTTP {exc.code}: {errors}{hint}"
+            )
+
+
+def zone_for(cf: CF, domain: str) -> tuple[str, str]:
+    """Resolve (zone_id, zone_name) for a hostname, trying successive parents.
+
+    `kana.gfrm.in` lives in the `gfrm.in` zone, `blazon.fyi` in its own — so the
+    zone is not derivable from the hostname without asking.
+    """
+    labels = domain.split(".")
+    for i in range(len(labels) - 1):
+        candidate = ".".join(labels[i:])
+        result = cf.call("GET", f"/zones?name={candidate}").get("result") or []
+        if result:
+            return result[0]["id"], candidate
+    raise SystemExit(
+        f"! no Cloudflare zone found for {domain} (tried every parent of it).\n"
+        f"  The zone must already exist on the account."
+    )
+
+
+# ---------------------------------------------------------------------------
+# steps
+
+
+def step(msg: str) -> None:
+    print(f"\n\033[1m==>\033[0m {msg}")
+
+
+def note(msg: str) -> None:
+    print(f"    {msg}")
+
+
+def scaffold(target: Path, name: str, domain: str) -> None:
+    """Copy template/ to target, substituting the three placeholders."""
+    if target.exists() and any(target.iterdir()):
+        note(f"{target} already exists and is non-empty — leaving it alone")
+        return
+    shutil.copytree(TEMPLATE, target, dirs_exist_ok=True)
+    substitutions = {
+        "{{NAME}}": name,
+        "{{DOMAIN}}": domain,
+        # A fresh compatibility_date per site, on purpose: it pins the Workers
+        # runtime semantics this code was written against. The four existing
+        # sites drifted to three different dates by accident; this makes the
+        # choice explicit and dated.
+        "{{COMPAT_DATE}}": date.today().isoformat(),
+    }
+    for path in target.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except UnicodeDecodeError:
+            continue  # binary asset, nothing to substitute
+        replaced = _apply_all(substitutions, text)
+        if replaced != text:
+            path.write_text(replaced)
+    note(f"scaffolded {target} from {TEMPLATE.name}/")
+
+
+def _apply_all(subs: dict[str, str], text: str) -> str:
+    """Fold every substitution over the text."""
+    for needle, value in subs.items():
+        text = text.replace(needle, value)
+    return text
+
+
+def git_init(target: Path, name: str) -> None:
+    if (target / ".git").exists():
+        note("git repo already initialised")
+        return
+    # No -b: the global init.defaultBranch is master and overriding it here
+    # would silently produce the one branch name this account does not use.
+    run("git", "init", "-q", cwd=target)
+    run("git", "add", "-A", cwd=target)
+    run("git", "commit", "-qm", f"Scaffold {name} from site-kit", cwd=target)
+    note("git init + initial commit")
+
+
+def github_repo(target: Path, name: str, private: bool) -> None:
+    existing = subprocess.run(
+        ("gh", "repo", "view", f"{GITHUB_OWNER}/{name}", "--json", "name"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if existing.returncode == 0:
+        note(f"github repo {GITHUB_OWNER}/{name} already exists")
+        if not run("git", "remote", cwd=target):
+            run(
+                "git", "remote", "add", "origin",
+                f"git@github.com:{GITHUB_OWNER}/{name}.git", cwd=target,
+            )
+            note("added origin remote")
+        return
+    run(
+        "gh", "repo", "create", f"{GITHUB_OWNER}/{name}",
+        "--private" if private else "--public",
+        "--source", str(target), "--remote", "origin", "--push",
+        cwd=target,
+    )
+    note(f"created and pushed {GITHUB_OWNER}/{name}")
+    # gh may create the repo with GitHub's own default branch; the account
+    # convention is master everywhere.
+    default = run(
+        "gh", "repo", "view", f"{GITHUB_OWNER}/{name}",
+        "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name",
+    )
+    if default != "master":
+        run("gh", "repo", "edit", f"{GITHUB_OWNER}/{name}", "--default-branch", "master")
+        note(f"default branch {default} -> master")
+
+
+def repo_secrets(name: str, token: str, account: str) -> None:
+    for key, value in (("CLOUDFLARE_API_TOKEN", token), ("CLOUDFLARE_ACCOUNT_ID", account)):
+        run("gh", "secret", "set", key, "--repo", f"{GITHUB_OWNER}/{name}", "--body", value)
+        note(f"set repo secret {key}")
+
+
+def kv_namespaces(cf: CF, target: Path, names: Iterable[str]) -> None:
+    """Create each KV namespace and splice its real id into wrangler.jsonc.
+
+    blazon's wrangler.toml shipped a PLACEHOLDER id with a comment warning it
+    must be replaced before deploy. Doing it here means no site ever carries a
+    placeholder id again.
+    """
+    names = list(names)
+    if not names:
+        return
+    existing = {
+        ns["title"]: ns["id"]
+        for ns in cf.call("GET", f"/accounts/{cf.account}/storage/kv/namespaces?per_page=100").get("result") or []
+    }
+    bindings = []
+    for binding in names:
+        if binding in existing:
+            note(f"KV {binding} already exists ({existing[binding]})")
+            ns_id = existing[binding]
+        else:
+            ns_id = cf.call(
+                "POST", f"/accounts/{cf.account}/storage/kv/namespaces",
+                {"title": binding},
+            )["result"]["id"]
+            note(f"created KV {binding} ({ns_id})")
+        bindings.append({"binding": binding, "id": ns_id})
+
+    config = target / "wrangler.jsonc"
+    text = config.read_text()
+    block = json.dumps(bindings, indent=2)
+    # The template carries this exact marker line; replacing it keeps the
+    # surrounding comments intact, which a json round-trip would destroy.
+    marker = '"kv_namespaces": []'
+    if marker not in text:
+        note(f"! could not find `{marker}` in wrangler.jsonc — add the bindings by hand:")
+        print(json.dumps(bindings, indent=2))
+        return
+    config.write_text(text.replace(marker, f'"kv_namespaces": {block}'))
+    note(f"wrote {len(bindings)} KV binding(s) into wrangler.jsonc")
+
+
+def first_deploy(target: Path, token: str, account: str) -> None:
+    """Deploy once locally so the Worker exists before a domain is attached.
+
+    A custom domain cannot be attached to a Worker that has never been
+    deployed, and CI cannot run until the repo has a workflow *and* secrets —
+    so the bootstrap deploy has to happen from here.
+    """
+    run("npm", "install", cwd=target, capture=False)
+    subprocess.run(
+        ("npx", "--yes", "wrangler", "deploy"),
+        cwd=target,
+        check=True,
+        env={
+            **__import__("os").environ,
+            "CLOUDFLARE_API_TOKEN": token,
+            "CLOUDFLARE_ACCOUNT_ID": account,
+        },
+    )
+    note("bootstrap deploy complete")
+
+
+def attach_domain(cf: CF, name: str, domain: str, zone_id: str) -> None:
+    """Attach the custom domain to the Worker.
+
+    This also writes the DNS record, so there is no separate DNS step. Note a
+    hostname can be attached to a Pages project OR a Worker, never both — when
+    migrating an existing site, detach it from Pages first.
+    """
+    current = cf.call("GET", f"/accounts/{cf.account}/workers/domains").get("result") or []
+    for entry in current:
+        if entry.get("hostname") == domain:
+            if entry.get("service") == name:
+                note(f"{domain} already attached to worker {name}")
+                return
+            raise SystemExit(
+                f"! {domain} is attached to worker {entry.get('service')}, not {name}."
+            )
+    cf.call(
+        "PUT", f"/accounts/{cf.account}/workers/domains",
+        {"environment": "production", "hostname": domain, "service": name, "zone_id": zone_id},
+    )
+    note(f"attached {domain} -> worker {name} (DNS record written by Cloudflare)")
+
+
+def verify(domain: str) -> None:
+    code = run(
+        "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+        "--retry", "5", "--retry-delay", "3", f"https://{domain}",
+        check=False,
+    )
+    note(f"GET https://{domain} -> HTTP {code}")
+    if code != "200":
+        note("  (DNS and the edge cert can take a minute; re-run to re-check)")
+
+
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="new-site", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("name", help="site + worker + repo name, e.g. kana")
+    parser.add_argument("domain", help="hostname to serve it on, e.g. kana.gfrm.in")
+    parser.add_argument("--kv", action="append", default=[], metavar="BINDING",
+                        help="KV namespace to create and bind (repeatable)")
+    parser.add_argument("--private", action="store_true", help="make the GitHub repo private")
+    parser.add_argument("--dir", type=Path, default=None, help="target directory (default ~/git/<name>)")
+    parser.add_argument("--dry-run", action="store_true", help="scaffold locally, touch nothing remote")
+    args = parser.parse_args(argv)
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.name):
+        raise SystemExit("! name must be lowercase alphanumeric with dashes")
+
+    target = args.dir or Path.home() / "git" / args.name
+
+    step(f"scaffold {args.name}")
+    scaffold(target, args.name, args.domain)
+    git_init(target, args.name)
+
+    if args.dry_run:
+        step("dry run — stopping before anything remote")
+        note(f"inspect {target}, then re-run without --dry-run")
+        return 0
+
+    token = secret(DEPLOY_TOKEN_KEY)
+    account = secret("CLOUDFLARE_ACCOUNT_ID")
+    if not token or not account:
+        raise SystemExit(
+            f"! missing {DEPLOY_TOKEN_KEY} or CLOUDFLARE_ACCOUNT_ID in the keyring.\n"
+            f"  See docs/NEW-SITE.md § The deploy token for how to mint it."
+        )
+    cf = CF(token=token, account=account)
+
+    step(f"resolve zone for {args.domain}")
+    zone_id, zone_name = zone_for(cf, args.domain)
+    note(f"zone {zone_name} ({zone_id})")
+
+    step("github repo + secrets")
+    github_repo(target, args.name, args.private)
+    repo_secrets(args.name, token, account)
+
+    if args.kv:
+        step("KV namespaces")
+        kv_namespaces(cf, target, args.kv)
+        run("git", "add", "-A", cwd=target)
+        run("git", "commit", "-qm", "Wire KV namespace bindings", cwd=target, check=False)
+        run("git", "push", "-q", "origin", "master", cwd=target, check=False)
+
+    step("bootstrap deploy")
+    first_deploy(target, token, account)
+
+    step("custom domain")
+    attach_domain(cf, args.name, args.domain, zone_id)
+
+    step("verify")
+    verify(args.domain)
+
+    print(f"\n\033[1mdone.\033[0m https://{args.domain} — pushes to master now deploy via CI.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
