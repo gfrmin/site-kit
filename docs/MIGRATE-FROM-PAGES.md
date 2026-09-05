@@ -107,18 +107,18 @@ strict order, and the site is **down** from step 2 until step 4.
 Have steps 2, 3 and 4 ready to run as one block. Everything before step 2 and
 after step 4 is unhurried.
 
-## Order for this fleet
+## Order used for this fleet (all six done, 2026-09-05)
 
-Least to most consequential, so each cutover de-risks the next:
+Least to most consequential, so each cutover de-risked the next:
 
 | # | Site | Notes |
 |---|---|---|
-| 1 | `kana` | 4 commits, 679 lines, no `functions/`, **no `wrangler.toml` at all** — create one. Lowest stakes in the fleet. |
-| 2 | `docavivplus` | Static Astro 4. Also rename `main` → `master` (account convention) and drop its local `deploy.sh`. |
-| 3 | `asiansinisrael` | Hugo; assets directory is `./public`, not `./dist`. Keep the Hugo build, submodule checkout and `fetch-depth: 0`. |
-| 4 | `atheniapartners` | A single `index.html` in `property-selling/site/` with no repo, no build and no CI. Give it its own repo via `new-site` and retire the hand deploy. |
-| 5 | `kaomoji` | 4 functions incl. the `next()` middleware; Analytics Engine binding; PWA service worker. |
-| 6 | `blazon` | Last. 10 routes, 2 KV namespaces, Turnstile, Stripe, resvg OG, 492 tests, and the only site taking payments. |
+| 1 | `kana` | 4 commits, no `functions/`, had no wrangler config at all. Lowest stakes; went first to prove the workflow. |
+| 2 | `docavivplus` | Static Astro 4. Also renamed `main` → `master` and dropped its local `deploy.sh`. |
+| 3 | `atheniapartners` | One `index.html` in `property-selling/site/` with no repo, no build and no CI. Stayed in that repo behind a `site/**` path filter rather than being split out. |
+| 4 | `asiansinisrael` | Hugo, assets at `./public`. The `_redirects` ordering problem above. |
+| 5 | `kaomoji` | First with `functions/`: the `next()` middleware, Analytics Engine, PWA service worker. |
+| 6 | `blazon` | Last. 494 tests, 10 routes, 2 KV namespaces, Turnstile, Stripe, the only site taking payments. |
 
 ## Per-site checks before swapping the domain
 
