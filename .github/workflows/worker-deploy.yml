@@ -1,0 +1,189 @@
+name: worker-deploy
+
+# The one deploy recipe for every static/Workers site on this account.
+#
+# Before this existed there were five copies of it — kaomoji's and kana's
+# differed by a single line, and kana carries a commit titled "Bump deploy
+# workflow actions to match kaomoji-app", i.e. a hand-performed cross-repo sync.
+# Callers now supply a handful of inputs and get the whole recipe, including the
+# parts each repo had independently discovered (SHA-pinned actions, a deploy
+# concurrency group, a post-deploy config smoke test).
+#
+# Callers look like:
+#
+#   jobs:
+#     deploy:
+#       uses: gfrmin/site-kit/.github/workflows/worker-deploy.yml@master
+#       with:
+#         build: npm run build
+#         test: npm test
+#       secrets: inherit
+#
+# `secrets: inherit` is required — this workflow reads CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID from the calling repository.
+
+on:
+  workflow_call:
+    inputs:
+      build:
+        description: Build command. Runs with every repo Variable exported (see the Build step).
+        type: string
+        default: npm run build
+      test:
+        description: >
+          Test command. When set, it runs as a separate job that `deploy` needs,
+          so a red suite blocks the deploy. Empty means no test gate.
+        type: string
+        default: ""
+      node:
+        description: >
+          Node version. One pin for the whole fleet. 24 is the floor, not a
+          preference — Astro 4 (docavivplus) requires >=21 and the repos that
+          pinned 22 were never tested above it.
+        type: string
+        default: "24"
+      hugo:
+        description: >
+          Hugo version. When set, installs Hugo extended *instead of* the Node
+          toolchain and skips `npm ci`. For asiansinisrael and any other Hugo site.
+        type: string
+        default: ""
+      submodules:
+        description: Passed to actions/checkout. Hugo themes are usually submodules.
+        type: string
+        default: "false"
+      fetch-depth:
+        description: >
+          Passed to actions/checkout. Hugo's .GitInfo/HUGO_ENABLEGITINFO needs
+          full history (0); everything else is fine with the default shallow clone.
+        type: number
+        default: 1
+      wrangler-command:
+        description: >
+          The wrangler invocation. Defaults to a plain Workers deploy. Override
+          only for a site that needs an --env or extra flags.
+        type: string
+        default: deploy
+      smoke-url:
+        description: >
+          A JSON endpoint to GET after deploying. Combined with `smoke-jq` it
+          fails the deploy on a bad config that a green build cannot see.
+        type: string
+        default: ""
+      smoke-jq:
+        description: >
+          A jq filter over the smoke-url response. If it evaluates to the string
+          "false", the deploy fails. Empty means "just check it is reachable".
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# A newer commit supersedes an in-flight deploy; nothing here is worth queueing.
+concurrency:
+  group: worker-deploy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: inputs.test != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.submodules }}
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: ${{ inputs.test }}
+
+  deploy:
+    # `always()` because `test` is skipped entirely when inputs.test is empty,
+    # and a skipped dependency would otherwise skip this job too. The explicit
+    # result check keeps a *failed* test blocking, which is the whole point.
+    needs: test
+    if: always() && needs.test.result != 'failure' && needs.test.result != 'cancelled' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.submodules }}
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: inputs.hugo == ''
+        with:
+          node-version: ${{ inputs.node }}
+          cache: npm
+
+      - run: npm ci
+        if: inputs.hugo == ''
+
+      - uses: peaceiris/actions-hugo@2752ce1d29631191ea3f27c23495fa06139a5b78 # v3.2.1
+        if: inputs.hugo != ''
+        with:
+          hugo-version: ${{ inputs.hugo }}
+          extended: true
+
+      # Every repository Variable is exported into the build environment.
+      #
+      # This is deliberate and it is what removes per-site workflow edits: a
+      # site that needs VITE_POSTHOG_KEY or PUBLIC_SITE at build time just sets
+      # a repo Variable and it appears here, with no change to this file.
+      #
+      # Variables, not Secrets, on purpose. A build-time key baked into a client
+      # bundle is public the moment it ships — blazon's workflow says exactly
+      # this about its Turnstile site key. Putting such a value in Secrets buys
+      # nothing and hides it from the person auditing the site. Real secrets
+      # belong in `wrangler secret put`, never in a bundle.
+      - name: Build
+        env:
+          REPO_VARS: ${{ toJSON(vars) }}
+          BUILD_CMD: ${{ inputs.build }}
+        run: |
+          set -euo pipefail
+          # @sh quotes each value, so a variable containing spaces or quotes
+          # cannot break out of the eval.
+          eval "$(printf '%s' "$REPO_VARS" | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"')"
+          eval "$BUILD_CMD"
+
+      - name: Deploy
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: ${{ inputs.wrangler-command }}
+
+      # A green build proves the code compiles. It cannot prove the deployed
+      # Worker has the bindings and secrets it needs — that is a property of the
+      # Cloudflare project, not of the repo. This step is the only thing in the
+      # fleet that has ever caught that class of fault.
+      - name: Post-deploy smoke
+        if: inputs.smoke-url != ''
+        env:
+          SMOKE_URL: ${{ inputs.smoke-url }}
+          SMOKE_JQ: ${{ inputs.smoke-jq }}
+        run: |
+          set -uo pipefail
+          body="$(curl -fsS --retry 5 --retry-delay 3 --retry-connrefused "$SMOKE_URL")" || {
+            echo "::warning::smoke URL unreachable (curl exit $?) — not failing the deploy on a network blip"
+            exit 0
+          }
+          echo "smoke: $body"
+          [ -n "$SMOKE_JQ" ] || exit 0
+          result="$(printf '%s' "$body" | jq -r "$SMOKE_JQ")" || {
+            echo "::warning::could not parse the smoke response (jq exit $?)"
+            exit 0
+          }
+          if [ "$result" = "false" ]; then
+            echo "::error::Post-deploy smoke failed: \`$SMOKE_JQ\` evaluated false against $SMOKE_URL"
+            exit 1
+          fi
+          echo "smoke ok: $SMOKE_JQ -> $result"
