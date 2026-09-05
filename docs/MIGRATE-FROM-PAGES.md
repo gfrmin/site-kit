@@ -74,22 +74,38 @@ Add the compile to the build script so CI does it:
 ## Cutover
 
 **A hostname belongs to a Pages project or a Worker, never both.** So there is a
-strict order, and a window between steps 2 and 3 where the domain is unattached.
+strict order, and the site is **down** from step 2 until step 4.
+
+> **Detaching from Pages does not delete the DNS record, and the Workers attach
+> refuses to overwrite it.** This cost kana about a minute of downtime on
+> 2026-09-05. `DELETE .../pages/projects/<p>/domains/<host>` succeeds and leaves
+> `CNAME <host> → <project>.pages.dev` in place, now pointing at a project that
+> no longer answers for it — so the site is already down. The follow-up
+> `PUT .../workers/domains` then fails with
+> `100117: Hostname '<host>' already has externally managed DNS records (A,
+> CNAME, etc). Delete them first`. **Step 3 below is the one that is easy to
+> miss, and skipping it turns a ten-second window into however long it takes to
+> work out what happened.**
 
 1. **Deploy the Worker and verify on `*.workers.dev`.** The account subdomain is
    `cloudflare-e5f`, so it is `https://<name>.cloudflare-e5f.workers.dev`. Check
    the routes that were Pages-specific, not just the homepage.
 2. **Remove the custom domain from the Pages project.**
-3. **Attach it to the Worker** — `PUT /accounts/:id/workers/domains`, which
-   rewrites the DNS record from `CNAME → <project>.pages.dev` to the Worker
-   route. `bin/new-site` does this step; for a migration run it by hand or with
-   the same call.
-4. **Verify**, then **leave the Pages project in place.** It is the rollback:
+   `DELETE /accounts/:id/pages/projects/<project>/domains/<host>`
+3. **Delete the leftover DNS record.** Look it up by name and delete it by id:
+   `GET /zones/:zid/dns_records?name=<host>` then `DELETE /zones/:zid/dns_records/:id`.
+   This needs **DNS Write**, which the fleet Workers token deliberately does not
+   have — use the legacy global key for this one-off rather than widening the
+   token, since a migration happens once per site and never again.
+4. **Attach it to the Worker** — `PUT /accounts/:id/workers/domains` with
+   `{environment, hostname, service, zone_id}`. Cloudflare writes the new DNS
+   record itself.
+5. **Verify**, then **leave the Pages project in place.** It is the rollback:
    re-attaching the domain to it is a one-call revert. Delete it weeks later,
    not the same day.
 
-Do steps 2 and 3 back to back. Everything before step 2 and after step 3 is
-unhurried.
+Have steps 2, 3 and 4 ready to run as one block. Everything before step 2 and
+after step 4 is unhurried.
 
 ## Order for this fleet
 

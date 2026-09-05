@@ -77,6 +77,32 @@ def secret(key: str) -> str | None:
 # Cloudflare API
 
 
+def _hint(status: int, errors: list[dict[str, Any]]) -> str:
+    """Turn the two Cloudflare failures that do not explain themselves into advice."""
+    codes = {e.get("code") for e in errors}
+    if 100117 in codes:
+        # Detaching a hostname from a Pages project leaves its DNS record
+        # behind, and this endpoint will not overwrite one it does not manage.
+        # The site is already down by the time you see this.
+        return (
+            "\n  The old DNS record for this hostname still exists — most likely a"
+            "\n  CNAME to <project>.pages.dev left behind when it was detached from"
+            "\n  Pages. Delete it, then retry:"
+            "\n    GET  /zones/<zid>/dns_records?name=<host>"
+            "\n    DELETE /zones/<zid>/dns_records/<id>"
+            "\n  That needs DNS Write, which the fleet Workers token does not have"
+            "\n  by design — use the legacy global key for this one-off."
+            "\n  See docs/MIGRATE-FROM-PAGES.md § Cutover."
+        )
+    if status == 403:
+        # The single most likely failure here, and the message does not say so.
+        return (
+            "\n  (403 on a Workers endpoint usually means the token is Pages-scoped."
+            "\n  See docs/NEW-SITE.md § The deploy token.)"
+        )
+    return ""
+
+
 @dataclass(frozen=True)
 class CF:
     token: str
@@ -104,17 +130,7 @@ class CF:
             except ValueError:
                 raise SystemExit(f"! CF {method} {path} -> HTTP {exc.code}: {payload}")
             errors = parsed.get("errors") or []
-            # A 403 on Workers with a Pages-scoped token is the single most
-            # likely failure here, and its message does not say so.
-            hint = (
-                "\n  (403 on a Workers endpoint usually means the token is "
-                "Pages-scoped. See docs/NEW-SITE.md § The deploy token.)"
-                if exc.code == 403
-                else ""
-            )
-            raise SystemExit(
-                f"! CF {method} {path} -> HTTP {exc.code}: {errors}{hint}"
-            )
+            raise SystemExit(f"! CF {method} {path} -> HTTP {exc.code}: {errors}{_hint(exc.code, errors)}")
 
 
 def zone_for(cf: CF, domain: str) -> tuple[str, str]:

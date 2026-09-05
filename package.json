@@ -27,12 +27,12 @@
     "docs"
   ],
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/ && python3 test/new_site_test.py"
   },
   "//": [
     "No dependencies and no build step, on purpose. Consumers install this",
     "straight from git (`npm i github:gfrmin/site-kit`), and a git dependency",
-    "never runs a build — so everything here has to be plain ESM that Node and",
+    "never runs a build \u2014 so everything here has to be plain ESM that Node and",
     "the Workers runtime can both load as-is.",
     "",
     "@resvg/resvg-wasm is a peer of ./og only: the sites that rasterise OG",

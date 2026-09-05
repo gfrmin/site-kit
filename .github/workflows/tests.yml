@@ -1,0 +1,47 @@
+name: tests
+
+# site-kit holds the deploy recipe for every site on the account, so a break
+# here breaks all of them at once. The suite is ~1s and needs no credentials,
+# no network and no Cloudflare account.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Must match the default `node` input of worker-deploy.yml — if the
+          # fleet pin moves, this moves with it or the suite stops proving
+          # anything about what the sites actually run.
+          node-version: "24"
+
+      - run: npm test
+
+      # The template is what every new site starts from, so a template that does
+      # not build is a broken `new-site`. This catches it here rather than in
+      # someone's first five minutes with a new repo.
+      - name: The template scaffolds, builds and passes its own tests
+        run: |
+          set -euo pipefail
+          ./bin/new-site smoketest smoketest.example.com --dry-run --dir /tmp/smoketest
+          test -z "$(grep -rl '{{' /tmp/smoketest --exclude-dir=.git || true)" \
+            || { echo "::error::unsubstituted {{placeholders}} left in the scaffold"; exit 1; }
+          cd /tmp/smoketest
+          npm install --no-audit --no-fund
+          npm run build
+          npm test
+          npx wrangler deploy --dry-run
