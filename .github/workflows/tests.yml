@@ -37,6 +37,12 @@ jobs:
       - name: The template scaffolds, builds and passes its own tests
         run: |
           set -euo pipefail
+          # new-site makes a real initial commit, and a bare runner has no git
+          # identity. Configuring it here rather than teaching the script to skip
+          # the commit: on a real machine an absent identity is a genuine problem
+          # and should stop the scaffold, not be worked around.
+          git config --global user.email ci@example.invalid
+          git config --global user.name "site-kit CI"
           ./bin/new-site smoketest smoketest.example.com --dry-run --dir /tmp/smoketest
           test -z "$(grep -rl '{{' /tmp/smoketest --exclude-dir=.git || true)" \
             || { echo "::error::unsubstituted {{placeholders}} left in the scaffold"; exit 1; }
