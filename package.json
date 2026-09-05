@@ -1,0 +1,50 @@
+{
+  "name": "site-kit",
+  "version": "0.1.0",
+  "description": "One deploy recipe, one scaffold, and the handful of utilities worth sharing across the Cloudflare Workers sites on this account.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gfrmin/site-kit"
+  },
+  "exports": {
+    "./og": "./packages/og/resvg.js",
+    "./web": "./packages/web/index.js",
+    "./web/base64url": "./packages/web/base64url.js",
+    "./web/clipboard": "./packages/web/clipboard.js",
+    "./web/share": "./packages/web/share.js",
+    "./web/storage": "./packages/web/storage.js",
+    "./web/a11y": "./packages/web/a11y.js",
+    "./seo/robots": "./packages/seo/robots.js",
+    "./seo/sitemap": "./packages/seo/sitemap.js",
+    "./kv/ratelimit": "./packages/kv/ratelimit.js"
+  },
+  "files": [
+    "packages",
+    "bin",
+    "template",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "//": [
+    "No dependencies and no build step, on purpose. Consumers install this",
+    "straight from git (`npm i github:gfrmin/site-kit`), and a git dependency",
+    "never runs a build — so everything here has to be plain ESM that Node and",
+    "the Workers runtime can both load as-is.",
+    "",
+    "@resvg/resvg-wasm is a peer of ./og only: the sites that rasterise OG",
+    "images already pin it (2.6.2), and the ones that do not should not be made",
+    "to install a wasm binary they never load."
+  ],
+  "peerDependencies": {
+    "@resvg/resvg-wasm": "^2.6.2"
+  },
+  "peerDependenciesMeta": {
+    "@resvg/resvg-wasm": {
+      "optional": true
+    }
+  }
+}
