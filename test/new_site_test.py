@@ -7,6 +7,9 @@ by path rather than imported. Everything tested here is pure.
 import importlib.machinery
 import importlib.util
 import sys
+import pathlib
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,6 +59,54 @@ class Substitution(unittest.TestCase):
         # So a template gaining a placeholder fails loudly (visible {{X}} in the
         # output) rather than silently producing an empty string.
         self.assertEqual(new_site._apply_all({}, "{{UNKNOWN}}"), "{{UNKNOWN}}")
+
+
+class AnalyticsGate(unittest.TestCase):
+    """--no-analytics must remove the gate cleanly, and only the gate."""
+
+    def _scaffolded(self, body):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        workflow = pathlib.Path(tmp) / ".github" / "workflows" / "deploy.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(body)
+        return pathlib.Path(tmp), workflow
+
+    def test_removes_both_gate_lines_and_keeps_the_rest(self):
+        target, workflow = self._scaffolded(
+            "jobs:\n"
+            "  deploy:\n"
+            "    with:\n"
+            "      build: npm run build\n"
+            "      require-vars: VITE_POSTHOG_KEY\n"
+            "      build-must-match: 'phc_[A-Za-z0-9]{20,}'\n"
+            "    secrets: inherit\n"
+        )
+        new_site.drop_analytics(target)
+        out = workflow.read_text()
+
+        self.assertNotIn("require-vars", out)
+        self.assertNotIn("build-must-match", out)
+        # Everything else survives, including the trailing line — a gate remover
+        # that eats `secrets: inherit` breaks the deploy in a way that looks
+        # nothing like analytics.
+        self.assertIn("build: npm run build", out)
+        self.assertIn("secrets: inherit", out)
+
+    def test_is_a_no_op_when_the_gate_is_already_absent(self):
+        # So a re-run, or a template that never had the gate, is harmless.
+        body = "jobs:\n  deploy:\n    with:\n      build: npm run build\n"
+        target, workflow = self._scaffolded(body)
+        new_site.drop_analytics(target)
+        self.assertEqual(workflow.read_text(), body)
+
+    def test_does_not_match_a_variable_that_merely_mentions_the_name(self):
+        # `require-vars` is matched as a key at the start of a line, so a build
+        # command or comment containing the word is left alone.
+        body = "    with:\n      build: echo require-vars is a key not a word\n"
+        target, workflow = self._scaffolded(body)
+        new_site.drop_analytics(target)
+        self.assertEqual(workflow.read_text(), body)
 
 
 if __name__ == "__main__":

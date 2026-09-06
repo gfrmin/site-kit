@@ -40,6 +40,15 @@ GITHUB_OWNER = "gfrmin"
 # exactly like a dead key. See docs/NEW-SITE.md § "The deploy token".
 DEPLOY_TOKEN_KEY = "CLOUDFLARE_WORKERS_DEPLOY_TOKEN"
 
+# Where a new site's analytics land. There are three PostHog projects on the
+# account and they are split by audience, not by stack: 137079 "pdm" holds the
+# commercial sites (renavon.com, webbsite, crhk.guru), 402418 holds
+# accessinfo.hk, and this one holds gfrm.in and the site-kit fleet. Sites are
+# told apart inside a project by $host, so sharing one is the norm, not a
+# compromise. Override with --posthog-project.
+POSTHOG_PROJECT_KEY = "POSTHOG_PROJECT_ID_GFRMIN"
+ANALYTICS_VAR = "VITE_POSTHOG_KEY"
+
 
 # ---------------------------------------------------------------------------
 # shell / keyring
@@ -250,6 +259,64 @@ def repo_secrets(name: str, token: str, account: str) -> None:
         note(f"set repo secret {key}")
 
 
+def repo_variables(name: str, pairs: dict[str, str]) -> None:
+    """Set repository Variables (not Secrets).
+
+    Variables, deliberately. A build-time value inlined into a client bundle is
+    public the moment it ships, so hiding it in Secrets buys nothing and costs
+    the next person the ability to see how the site is configured. Real secrets
+    go to `wrangler secret put`, where the browser never sees them.
+    """
+    for key, value in pairs.items():
+        run("gh", "variable", "set", key, "--repo", f"{GITHUB_OWNER}/{name}", "--body", value)
+        note(f"set repo variable {key}")
+
+
+def posthog_site_key(project: str) -> str | None:
+    """Resolve a project's browser token (phc_...) from the PostHog API.
+
+    The keyring holds a *personal* API key, which is a management credential and
+    must never reach a bundle; the browser token is a per-project value fetched
+    with it. Doing the lookup here is what stops a new site being scaffolded
+    with an empty key and going dark — the failure this whole guard exists for.
+
+    Note the API host is not the ingestion host: events go to us.i.posthog.com,
+    the REST API lives at us.posthog.com.
+    """
+    personal = secret("POSTHOG_PERSONAL_API_KEY")
+    if not personal or not project:
+        return None
+    host = secret("POSTHOG_HOST") or "https://us.i.posthog.com"
+    api = re.sub(r"//(\w+)\.i\.", r"//\1.", host.rstrip("/"))
+    request = urllib.request.Request(
+        f"{api}/api/projects/{project}/",
+        headers={"Authorization": f"Bearer {personal}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.load(response).get("api_token") or None
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        note(f"! could not reach the PostHog API ({exc}) — set {ANALYTICS_VAR} by hand")
+        return None
+
+
+def drop_analytics(target: Path) -> None:
+    """Remove the analytics gate from a scaffolded site's caller workflow.
+
+    Only for a site that genuinely should not be measured. The lines are removed
+    rather than commented out so `require-vars` never refers to a variable
+    nobody intends to set — a guard that cries wolf gets deleted wholesale, and
+    then the real one goes with it.
+    """
+    workflow = target / ".github" / "workflows" / "deploy.yml"
+    kept = [
+        line for line in workflow.read_text().splitlines(keepends=True)
+        if not re.match(r"\s*(require-vars|build-must-match):", line)
+    ]
+    workflow.write_text("".join(kept))
+    note("removed the analytics gate from deploy.yml (--no-analytics)")
+
+
 def kv_namespaces(cf: CF, target: Path, names: Iterable[str]) -> None:
     """Create each KV namespace and splice its real id into wrangler.jsonc.
 
@@ -360,6 +427,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="KV namespace to create and bind (repeatable)")
     parser.add_argument("--private", action="store_true", help="make the GitHub repo private")
     parser.add_argument("--dir", type=Path, default=None, help="target directory (default ~/git/<name>)")
+    parser.add_argument("--var", action="append", default=[], metavar="KEY=VALUE",
+                        help="repository Variable to set (repeatable). Build-time config, "
+                             "never a secret — it ends up in the client bundle.")
+    parser.add_argument("--posthog-project", default=None, metavar="ID",
+                        help=f"PostHog project id for {ANALYTICS_VAR} "
+                             f"(default: the {POSTHOG_PROJECT_KEY} keyring entry)")
+    parser.add_argument("--no-analytics", action="store_true",
+                        help="scaffold without the analytics gate — for a site that "
+                             "genuinely should not be measured")
     parser.add_argument("--dry-run", action="store_true", help="scaffold locally, touch nothing remote")
     args = parser.parse_args(argv)
 
@@ -368,8 +444,17 @@ def main(argv: list[str] | None = None) -> int:
 
     target = args.dir or Path.home() / "git" / args.name
 
+    variables = {}
+    for pair in args.var:
+        if "=" not in pair:
+            raise SystemExit(f"! --var expects KEY=VALUE, got {pair!r}")
+        key, value = pair.split("=", 1)
+        variables[key] = value
+
     step(f"scaffold {args.name}")
     scaffold(target, args.name, args.domain)
+    if args.no_analytics:
+        drop_analytics(target)
     git_init(target, args.name)
 
     if args.dry_run:
@@ -393,6 +478,26 @@ def main(argv: list[str] | None = None) -> int:
     step("github repo + secrets")
     github_repo(target, args.name, args.private)
     repo_secrets(args.name, token, account)
+
+    step("repo variables")
+    if not args.no_analytics and ANALYTICS_VAR not in variables:
+        project = args.posthog_project or secret(POSTHOG_PROJECT_KEY)
+        site_key = posthog_site_key(project)
+        if site_key:
+            variables[ANALYTICS_VAR] = site_key
+            note(f"resolved {ANALYTICS_VAR} from PostHog project {project}")
+        else:
+            # Deliberately not fatal, and deliberately loud. The scaffolded
+            # workflow lists this variable under require-vars, so the first CI
+            # run fails with a message naming it. A site that cannot measure
+            # itself failing its deploy is the correct outcome — it is the
+            # silent success that cost weeks.
+            note(f"! {ANALYTICS_VAR} unresolved — CI will refuse to build until you set it:")
+            note(f"    gh variable set {ANALYTICS_VAR} --repo {GITHUB_OWNER}/{args.name} --body phc_...")
+    if variables:
+        repo_variables(args.name, variables)
+    else:
+        note("none to set")
 
     if args.kv:
         step("KV namespaces")

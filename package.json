@@ -27,7 +27,7 @@
     "docs"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js && python3 test/new_site_test.py"
+    "test": "node --test test/*.test.js && python3 test/new_site_test.py && python3 test/guard_test.py"
   },
   "//": [
     "No dependencies and no build step, on purpose. Consumers install this",
