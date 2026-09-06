@@ -119,3 +119,73 @@ The template deploys assets only. To add routes:
 
 Rate limiting, OG rasterisation and the base64url helpers are already in
 `site-kit/kv/ratelimit`, `site-kit/og` and `site-kit/web/base64url`.
+
+## Verifying that a site is actually measured
+
+The two deploy gates (`require-vars`, `build-must-match`) prove the key reached
+the runner and reached the bundle. **Neither proves an event reaches PostHog**,
+and the gap between those is where a site sits dark while every signal reads
+green. The only sufficient check is to ask PostHog.
+
+### Read events with the query endpoint, not `/events/`
+
+```sh
+PK=$(secret-tool lookup service env key POSTHOG_PERSONAL_API_KEY)
+curl -sS -X POST -H "Authorization: Bearer $PK" -H 'content-type: application/json' \
+  "https://us.posthog.com/api/projects/<ID>/query/" \
+  -d '{"query":{"kind":"HogQLQuery","query":
+       "select properties.$host, event, count(), max(timestamp) from events
+        where timestamp > now() - interval 30 minute group by 1,2 order by 4 desc"}}'
+```
+
+Two traps in that one command:
+
+- **`GET /api/projects/:id/events/` lags.** Measured 2026-09-06: it was stale by
+  two hours and reported the same "latest" timestamp for every host, which made
+  a working site look dead. The `query` endpoint answered within ~20 s.
+- **The API host is not the ingestion host.** Events go to `us.i.posthog.com`;
+  the REST API is `us.posthog.com`. Same string bar two characters.
+
+A hand-made event is the quickest way to separate "the key/project/ingestion is
+broken" from "the browser is not sending":
+
+```sh
+curl -sS -X POST "https://us.i.posthog.com/i/v0/e/" -H 'content-type: application/json' \
+  -d '{"api_key":"phc_...","event":"__probe","distinct_id":"probe","properties":{}}'
+```
+
+A `200 {"status":"Ok"}` clears all three in one shot.
+
+### Playwright cannot see analytics unless you mask three bot signals
+
+**posthog-js silently drops events from anything it thinks is automated** —
+before `before_send`, before any network call, with nothing logged. `capture()`
+returns normally. The observable result is identical to a broken SDK, and it
+cost a full investigation and a wrongly-filed bug on 2026-09-06.
+
+Its check ends in `return !!navigator.webdriver`, and its blocked-UA list
+contains `"headlesschrome"`. Playwright's Chromium trips both — and a third that
+survives overriding `navigator.userAgent`:
+
+```python
+ctx = browser.new_context(user_agent="Mozilla/5.0 (X11; Linux x86_64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+ctx.add_init_script("""
+  Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+  Object.defineProperty(navigator,'userAgentData',{get:()=>({
+    brands:[{brand:'Chromium',version:'140'},{brand:'Google Chrome',version:'140'}],
+    mobile:false, platform:'Linux'})});
+""")
+```
+
+`navigator.userAgentData.brands` still advertises `HeadlessChrome` after the UA
+string is replaced, so masking the UA alone is not enough and looks exactly like
+the failure it is hiding.
+
+### Always run a known-good control first
+
+Point the same harness at a page that is known to emit. If **it** shows no
+`POST /e/`, the harness is broken, not the site under test. This is one command
+and it is the check that settles the question — on 2026-09-06 it was run last
+instead of first, and everything before it was wasted.
+
