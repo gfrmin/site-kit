@@ -15,4 +15,12 @@ jobs:
     with:
       build: npm run build
       test: npm test
+      # Refuse to build without the analytics key, and then refuse to deploy
+      # unless the key actually reached the bundle. Two checks because they fail
+      # for different reasons: the first catches "nobody set the Variable", the
+      # second catches "the Variable was set but the build read a different
+      # name". Delete both lines if this site genuinely should not be measured —
+      # but delete them deliberately, which is the whole point.
+      require-vars: VITE_POSTHOG_KEY
+      build-must-match: 'phc_[A-Za-z0-9]{20,}'
     secrets: inherit

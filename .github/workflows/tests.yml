@@ -51,3 +51,35 @@ jobs:
           npm run build
           npm test
           npx wrangler deploy --dry-run
+
+      # The scaffolded site must be *born* gated: the guard is worth nothing if
+      # a new repo has to remember to opt in. Asserted against the generated
+      # workflow rather than the template, so a substitution that mangles it is
+      # caught too.
+      - name: A scaffolded site ships with the analytics gate wired
+        run: |
+          set -euo pipefail
+          workflow=/tmp/smoketest/.github/workflows/deploy.yml
+          grep -q 'require-vars: VITE_POSTHOG_KEY' "$workflow" \
+            || { echo "::error::the scaffold lost its require-vars gate"; exit 1; }
+          grep -q 'build-must-match:' "$workflow" \
+            || { echo "::error::the scaffold lost its build-must-match gate"; exit 1; }
+          # And the build it just ran must NOT satisfy that gate, because no key
+          # was set — proving the guard would actually fire on a dark site
+          # rather than passing vacuously.
+          if grep -rEq 'phc_[A-Za-z0-9]{20,}' /tmp/smoketest/dist; then
+            echo "::error::an unkeyed build matched the analytics pattern — the gate proves nothing"
+            exit 1
+          fi
+          echo "ok: gate present, and an unkeyed build does not satisfy it"
+
+      - name: --no-analytics removes the gate and still builds
+        run: |
+          set -euo pipefail
+          ./bin/new-site nogate nogate.example.com --dry-run --no-analytics --dir /tmp/nogate
+          workflow=/tmp/nogate/.github/workflows/deploy.yml
+          ! grep -qE '^\s*(require-vars|build-must-match):' "$workflow" \
+            || { echo "::error::--no-analytics left the gate in place"; exit 1; }
+          grep -q 'secrets: inherit' "$workflow" \
+            || { echo "::error::--no-analytics ate more than the gate"; exit 1; }
+          cd /tmp/nogate && npm install --no-audit --no-fund && npm run build

@@ -2,3 +2,7 @@ node_modules/
 dist/
 .wrangler/
 .DS_Store
+
+# Local build-time config. .env.example is committed; .env is not.
+.env
+.env.local
