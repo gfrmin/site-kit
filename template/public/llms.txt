@@ -1,0 +1,7 @@
+# {{NAME}}
+
+> Replace this line: one or two sentences on what {{NAME}} is and who it is for. site-kit's output check refuses to deploy until it is replaced.
+
+## Pages
+
+- [Home](https://{{DOMAIN}}/): the front page

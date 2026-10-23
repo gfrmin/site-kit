@@ -93,8 +93,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _check
+          # The scaffold ships an llms.txt stub the check must refuse; a real site
+          # replaces it, so the "good" copy does too.
+          grep -q 'Replace this line' /tmp/smoketest/dist/llms.txt
+          cp -r /tmp/smoketest/dist _check/stub
           cp -r /tmp/smoketest/dist _check/good
-          cp -r /tmp/smoketest/dist _check/broken
+          sed -i 's/^> Replace this line.*/> A test site./' _check/good/llms.txt
+          cp -r _check/good _check/broken
+          cp -r _check/good _check/nollms
+          rm _check/nollms/llms.txt
           # A link to a page the build never produced: the check must refuse it.
           sed -i 's#</body>#<a href="/no-such-page/">x</a></body>#' _check/broken/index.html
           grep -q 'no-such-page' _check/broken/index.html
@@ -121,12 +128,32 @@ jobs:
           expect: "this string is in no page anywhere"
           check-links: "false"
 
+      - name: "Output check: no llms.txt fails"
+        id: nollms
+        continue-on-error: true
+        uses: ./.github/actions/check-build-output
+        with:
+          dir: _check/nollms
+          check-links: "false"
+
+      - name: "Output check: the scaffold's llms.txt stub fails"
+        id: stub
+        continue-on-error: true
+        uses: ./.github/actions/check-build-output
+        with:
+          dir: _check/stub
+          check-links: "false"
+
       - name: Both failure cases did fail
         env:
           BROKEN: ${{ steps.broken.outcome }}
           WRONG: ${{ steps.wrong.outcome }}
+          NOLLMS: ${{ steps.nollms.outcome }}
+          STUB: ${{ steps.stub.outcome }}
         run: |
           set -euo pipefail
+          [ "$NOLLMS" = failure ] || { echo "::error::a build with no llms.txt passed the output check ($NOLLMS)"; exit 1; }
+          [ "$STUB" = failure ] || { echo "::error::the scaffold's llms.txt stub passed the output check ($STUB)"; exit 1; }
           [ "$BROKEN" = failure ] || { echo "::error::a link to /no-such-page/ passed the output check ($BROKEN)"; exit 1; }
           [ "$WRONG" = failure ] || { echo "::error::a missing expect string passed the output check ($WRONG)"; exit 1; }
           echo "ok: both seeded defects were refused"
