@@ -79,7 +79,9 @@ suite. The `test` job builds the site exactly as `deploy` will and checks the
 output: `build-output-dir/index.html` exists and contains `expect`, and no
 internal link points at a file the build did not produce (lychee, offline, so it
 depends on nothing but the commit). Then the site's own `test` command, if any.
-`deploy` runs only if all of that passed. Set `check-links: false` only with a
+`deploy` runs only if all of that passed. The build must also carry a real
+`llms.txt` (llmstxt.org: present, an H1 first, not the scaffold's stub); a new
+site's scaffold ships a stub that refuses to deploy until it is written. Set `check-links: false` only with a
 comment naming the issue that tracks the broken links.
 
 Before deploying, `default-headers` adds `X-Content-Type-Options: nosniff`,

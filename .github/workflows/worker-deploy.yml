@@ -69,6 +69,12 @@ on:
           contain, usually the site's name. Empty checks only that it exists.
         type: string
         default: ""
+      require-llms:
+        description: >
+          Fail the `test` job unless the build has a real llms.txt (present, an H1
+          first, not the scaffold stub). Owner ruling 2026-10-23: every site serves one.
+        type: boolean
+        default: true
       check-links:
         description: >
           Fail the `test` job on any internal link to a file the build did not
@@ -161,6 +167,7 @@ jobs:
           dir: ${{ inputs.build-output-dir }}
           expect: ${{ inputs.expect }}
           check-links: ${{ inputs.check-links }}
+          require-llms: ${{ inputs.require-llms }}
 
       - name: The site's own tests
         if: inputs.test != ''
