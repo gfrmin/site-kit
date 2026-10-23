@@ -140,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           f=_check/good/_headers
-          for h in "X-Content-Type-Options: nosniff" "X-Frame-Options: SAMEORIGIN" "Referrer-Policy: strict-origin-when-cross-origin"; do
+          for h in "X-Content-Type-Options: nosniff" "X-Frame-Options: SAMEORIGIN" "Referrer-Policy: strict-origin-when-cross-origin" "Content-Security-Policy: frame-ancestors 'self'; base-uri 'self'; object-src 'none'"; do
             grep -qF "  $h" "$f" || { echo "::error::$f lacks $h"; cat "$f"; exit 1; }
           done
           mkdir -p _check/own && printf '/*\n  X-Frame-Options: DENY\n' > _check/own/_headers
