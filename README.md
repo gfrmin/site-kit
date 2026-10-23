@@ -83,8 +83,10 @@ depends on nothing but the commit). Then the site's own `test` command, if any.
 comment naming the issue that tracks the broken links.
 
 Before deploying, `default-headers` adds `X-Content-Type-Options: nosniff`,
-`X-Frame-Options: SAMEORIGIN` and `Referrer-Policy:
-strict-origin-when-cross-origin` to the build's `_headers` for every path,
+`X-Frame-Options: SAMEORIGIN`, `Referrer-Policy:
+strict-origin-when-cross-origin` and a baseline `Content-Security-Policy`
+(`frame-ancestors 'self'; base-uri 'self'; object-src 'none'`) to the build's
+`_headers` for every path,
 skipping any header the site's own `_headers` already sets. HSTS comes from the
 zone. `secrets: inherit` is required — the
 workflow reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the

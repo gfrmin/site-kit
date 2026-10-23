@@ -12,6 +12,11 @@ description: >
 # `_headers` covers responses from the asset server only. A response a Worker
 # builds itself (blazon's /api/*, kaomoji's functions) sets its own headers.
 #
+# The Content-Security-Policy is a baseline that restricts nothing a page loads:
+# frame-ancestors 'self' (the modern twin of SAMEORIGIN), base-uri 'self' and
+# object-src 'none'. A script policy is per site (analytics, Turnstile, Stripe)
+# and belongs in that site's own _headers, which then wins.
+#
 # A header the site's own `_headers` already names, for any path, is left out
 # entirely. That is deliberate: Cloudflare joins two values for one header with
 # a comma, and "SAMEORIGIN, DENY" is not a frame policy a browser honours.
@@ -43,6 +48,7 @@ runs:
         X-Content-Type-Options: nosniff
         X-Frame-Options: SAMEORIGIN
         Referrer-Policy: strict-origin-when-cross-origin
+        Content-Security-Policy: frame-ancestors 'self'; base-uri 'self'; object-src 'none'
         HEADERS
         if [ -z "$add" ]; then
           echo "ok: nothing to add"; exit 0
