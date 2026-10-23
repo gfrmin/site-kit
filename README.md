@@ -34,6 +34,9 @@ demonstrably better than the others.
 
 ```
 .github/workflows/worker-deploy.yml   the one deploy recipe (workflow_call)
+.github/actions/build                 toolchain + build, shared by its test and deploy jobs
+.github/actions/check-build-output    the output check every deploy is gated on
+.github/actions/default-headers       baseline security headers via _headers
 bin/new-site                          scaffold + GitHub + Cloudflare, one command
 template/                             the skeleton a new site starts from
 packages/
@@ -63,11 +66,27 @@ jobs:
     with:
       build: npm run build
       test: npm test
+      expect: My Site   # a string the built home page must contain
     secrets: inherit
 ```
 
-Inputs: `build`, `test`, `node`, `hugo`, `submodules`, `fetch-depth`,
-`wrangler-command`, `smoke-url`, `smoke-jq`. `secrets: inherit` is required — the
+Inputs: `build`, `test`, `expect`, `check-links`, `build-output-dir`, `node`,
+`hugo`, `submodules`, `fetch-depth`, `require-vars`, `build-must-match`,
+`wrangler-command`, `smoke-url`, `smoke-jq`.
+
+**Every deploy is gated on its build being whole**, with or without a test
+suite. The `test` job builds the site exactly as `deploy` will and checks the
+output: `build-output-dir/index.html` exists and contains `expect`, and no
+internal link points at a file the build did not produce (lychee, offline, so it
+depends on nothing but the commit). Then the site's own `test` command, if any.
+`deploy` runs only if all of that passed. Set `check-links: false` only with a
+comment naming the issue that tracks the broken links.
+
+Before deploying, `default-headers` adds `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: SAMEORIGIN` and `Referrer-Policy:
+strict-origin-when-cross-origin` to the build's `_headers` for every path,
+skipping any header the site's own `_headers` already sets. HSTS comes from the
+zone. `secrets: inherit` is required — the
 workflow reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the
 calling repo.
 

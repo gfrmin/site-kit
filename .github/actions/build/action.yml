@@ -1,0 +1,70 @@
+name: build
+description: >
+  Install a site's toolchain and build it, the one way worker-deploy.yml does
+  in both its jobs: `test` builds to check the output, `deploy` builds to ship it.
+
+# One copy because two would drift: the output `test` checks must be built
+# exactly as the output `deploy` ships.
+
+inputs:
+  node:
+    description: Node version (worker-deploy.yml's `node` input).
+    required: true
+  hugo:
+    description: Hugo version; when set, Hugo replaces Node entirely.
+    default: ""
+  build:
+    description: Build command. Empty means the repo is already the built artifact.
+    default: ""
+  repo-vars:
+    description: toJSON(vars) from the caller, exported into the build.
+    default: "{}"
+
+runs:
+  using: composite
+  steps:
+    # Three toolchain shapes, decided by inputs and by what is in the repo:
+    # Hugo when `hugo` is set, Node when there is a package.json, and neither
+    # for a site that is already static files (atheniapartners is one HTML
+    # file). Keying Node off the package.json rather than off `hugo == ''`
+    # means the no-toolchain case does not have to pretend to be a Node repo
+    # just to reach the deploy step.
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      if: inputs.hugo == '' && hashFiles('package.json') != ''
+      with:
+        node-version: ${{ inputs.node }}
+        cache: npm
+
+    - run: npm ci
+      if: inputs.hugo == '' && hashFiles('package.json') != ''
+      shell: bash
+
+    - uses: peaceiris/actions-hugo@2752ce1d29631191ea3f27c23495fa06139a5b78 # v3.2.1
+      if: inputs.hugo != ''
+      with:
+        hugo-version: ${{ inputs.hugo }}
+        extended: true
+
+    # Every repository Variable is exported into the build environment.
+    #
+    # This is deliberate and it is what removes per-site workflow edits: a
+    # site that needs VITE_POSTHOG_KEY or PUBLIC_SITE at build time just sets
+    # a repo Variable and it appears here, with no change to this file.
+    #
+    # Variables, not Secrets, on purpose. A build-time key baked into a client
+    # bundle is public the moment it ships — blazon's workflow says exactly
+    # this about its Turnstile site key. Putting such a value in Secrets buys
+    # nothing and hides it from the person auditing the site. Real secrets
+    # belong in `wrangler secret put`, never in a bundle.
+    - name: Build
+      if: inputs.build != ''
+      shell: bash
+      env:
+        REPO_VARS: ${{ inputs.repo-vars }}
+        BUILD_CMD: ${{ inputs.build }}
+      run: |
+        set -euo pipefail
+        # @sh quotes each value, so a variable containing spaces or quotes
+        # cannot break out of the eval.
+        eval "$(printf '%s' "$REPO_VARS" | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"')"
+        eval "$BUILD_CMD"

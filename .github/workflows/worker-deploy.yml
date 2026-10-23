@@ -56,13 +56,31 @@ on:
         type: string
         default: ""
       build-output-dir:
-        description: Directory that `build-must-match` searches. Match assets.directory.
+        description: >
+          The build output directory, the same as assets.directory in
+          wrangler.jsonc. `build-must-match` searches it, the output check
+          (`expect`, `check-links`) checks it and default security headers are
+          written into it.
         type: string
         default: dist
+      expect:
+        description: >
+          A fixed string the built home page (build-output-dir/index.html) must
+          contain, usually the site's name. Empty checks only that it exists.
+        type: string
+        default: ""
+      check-links:
+        description: >
+          Fail the `test` job on any internal link to a file the build did not
+          produce (lychee, offline). Set false only with a comment naming the
+          issue that tracks the broken links.
+        type: boolean
+        default: true
       test:
         description: >
-          Test command. When set, it runs as a separate job that `deploy` needs,
-          so a red suite blocks the deploy. Empty means no test gate.
+          Test command, run in the `test` job after the output check. Empty runs
+          the output check alone: every site is gated on its build being whole,
+          with or without a suite of its own.
         type: string
         default: ""
       node:
@@ -117,7 +135,13 @@ concurrency:
 
 jobs:
   test:
-    if: inputs.test != ''
+    # Always runs, so every deploy is gated on at least the output check. It
+    # builds the site the way `deploy` will (the shared `build` action) and
+    # checks what came out: the home page exists and says what it should, and
+    # no internal link points at nothing. Then the site's own suite, if any.
+    #
+    # The actions are pinned @master like this workflow, which callers also
+    # call @master, so a caller always runs one consistent version of site-kit.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,21 +149,28 @@ jobs:
           submodules: ${{ inputs.submodules }}
           fetch-depth: ${{ inputs.fetch-depth }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: gfrmin/site-kit/.github/actions/build@master
         with:
-          node-version: ${{ inputs.node }}
-          cache: npm
+          node: ${{ inputs.node }}
+          hugo: ${{ inputs.hugo }}
+          build: ${{ inputs.build }}
+          repo-vars: ${{ toJSON(vars) }}
 
-      - run: npm ci
+      - uses: gfrmin/site-kit/.github/actions/check-build-output@master
+        with:
+          dir: ${{ inputs.build-output-dir }}
+          expect: ${{ inputs.expect }}
+          check-links: ${{ inputs.check-links }}
 
-      - run: ${{ inputs.test }}
+      - name: The site's own tests
+        if: inputs.test != ''
+        run: ${{ inputs.test }}
 
   deploy:
-    # `always()` because `test` is skipped entirely when inputs.test is empty,
-    # and a skipped dependency would otherwise skip this job too. The explicit
-    # result check keeps a *failed* test blocking, which is the whole point.
+    # `test` always runs now, so this needs it to have SUCCEEDED: a skipped or
+    # failed test job holds the deploy back.
     needs: test
-    if: always() && needs.test.result != 'failure' && needs.test.result != 'cancelled' && github.event_name != 'pull_request'
+    if: needs.test.result == 'success' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       # Before the checkout, because it needs nothing from the repo. A missing
@@ -175,50 +206,13 @@ jobs:
           submodules: ${{ inputs.submodules }}
           fetch-depth: ${{ inputs.fetch-depth }}
 
-      # Three toolchain shapes, decided by inputs and by what is in the repo:
-      # Hugo when `hugo` is set, Node when there is a package.json, and neither
-      # for a site that is already static files (atheniapartners is one HTML
-      # file). Keying Node off the package.json rather than off `hugo == ''`
-      # means the no-toolchain case does not have to pretend to be a Node repo
-      # just to reach the deploy step.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: inputs.hugo == '' && hashFiles('package.json') != ''
+      # The same build `test` checked: one action, so the two cannot drift.
+      - uses: gfrmin/site-kit/.github/actions/build@master
         with:
-          node-version: ${{ inputs.node }}
-          cache: npm
-
-      - run: npm ci
-        if: inputs.hugo == '' && hashFiles('package.json') != ''
-
-      - uses: peaceiris/actions-hugo@2752ce1d29631191ea3f27c23495fa06139a5b78 # v3.2.1
-        if: inputs.hugo != ''
-        with:
-          hugo-version: ${{ inputs.hugo }}
-          extended: true
-
-      # Every repository Variable is exported into the build environment.
-      #
-      # This is deliberate and it is what removes per-site workflow edits: a
-      # site that needs VITE_POSTHOG_KEY or PUBLIC_SITE at build time just sets
-      # a repo Variable and it appears here, with no change to this file.
-      #
-      # Variables, not Secrets, on purpose. A build-time key baked into a client
-      # bundle is public the moment it ships — blazon's workflow says exactly
-      # this about its Turnstile site key. Putting such a value in Secrets buys
-      # nothing and hides it from the person auditing the site. Real secrets
-      # belong in `wrangler secret put`, never in a bundle.
-      - name: Build
-        # Empty means the repo is already the built artifact — nothing to run.
-        if: inputs.build != ''
-        env:
-          REPO_VARS: ${{ toJSON(vars) }}
-          BUILD_CMD: ${{ inputs.build }}
-        run: |
-          set -euo pipefail
-          # @sh quotes each value, so a variable containing spaces or quotes
-          # cannot break out of the eval.
-          eval "$(printf '%s' "$REPO_VARS" | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"')"
-          eval "$BUILD_CMD"
+          node: ${{ inputs.node }}
+          hugo: ${{ inputs.hugo }}
+          build: ${{ inputs.build }}
+          repo-vars: ${{ toJSON(vars) }}
 
       # `require-vars` proves the value reached the runner. This proves it
       # reached the artifact — the difference is a build that exported the
@@ -240,6 +234,10 @@ jobs:
             echo "::error::Nothing under $OUT_DIR matches /$PATTERN/. The build ran and the variables were present, so the likely cause is that the build never read the value it needed — check the prefix the bundler expects (Vite only exposes VITE_*)."
             exit 1
           fi
+
+      - uses: gfrmin/site-kit/.github/actions/default-headers@master
+        with:
+          dir: ${{ inputs.build-output-dir }}
 
       - name: Deploy
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0

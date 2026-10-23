@@ -1,0 +1,76 @@
+name: check-build-output
+description: >
+  Prove a built static site is whole before it ships: the home page exists,
+  says what it should, and no internal link points at a file the build did not
+  produce.
+
+# Why this exists. A static site's real failure is not a red unit test; it is a
+# build that succeeds and ships a missing page or a link to nothing. On
+# 2026-10-23 the first run of this check over asiansinisrael's build found 6,775
+# links to 404s, every one of them live: the footer linked five pages in four
+# languages that were never translated. Nothing in a green build or a 200 from
+# the home page could see it.
+#
+# Used by worker-deploy.yml's `test` job, which `deploy` needs, so a failure here
+# holds the deploy back. site-kit's own tests.yml runs it on the template's
+# build (must pass) and on a copy with a link broken on purpose (must fail).
+
+inputs:
+  dir:
+    description: The build output directory (assets.directory in wrangler.jsonc).
+    required: true
+  expect:
+    description: >
+      A fixed string the home page must contain, usually the site's name. Empty
+      skips this part. Fixed, not a regex, so an ampersand or a bracket in a
+      title needs no escaping.
+    default: ""
+  check-links:
+    description: >
+      "true" to fail on any internal link to a missing file. Turn it off only
+      with a comment naming the issue that tracks the broken links, so the
+      exemption is visible and has an end.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: The home page exists and says what it should
+      shell: bash
+      env:
+        DIR: ${{ inputs.dir }}
+        EXPECT: ${{ inputs.expect }}
+      run: |
+        set -euo pipefail
+        if [ ! -f "$DIR/index.html" ]; then
+          echo "::error::$DIR/index.html does not exist after the build. Is build-output-dir the same as assets.directory in wrangler.jsonc?"
+          exit 1
+        fi
+        echo "ok: $DIR/index.html exists ($(wc -c < "$DIR/index.html") bytes)"
+        if [ -n "$EXPECT" ]; then
+          if grep -qF -- "$EXPECT" "$DIR/index.html"; then
+            echo "ok: $DIR/index.html contains \"$EXPECT\""
+          else
+            echo "::error::$DIR/index.html does not contain \"$EXPECT\": the build produced a home page, but not this site's."
+            exit 1
+          fi
+        fi
+
+    # --offline: only files in the build are checked, never the network, so the
+    # result depends on nothing but this commit. --root-dir resolves root-relative
+    # links (/about/) against the build; --index-files resolves a directory link
+    # to its index.html, as the Workers asset server does.
+    - name: No internal link points at a missing file
+      if: inputs.check-links == 'true'
+      uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+      with:
+        lycheeVersion: v0.24.2
+        args: >-
+          --offline --no-progress
+          --root-dir ${{ github.workspace }}/${{ inputs.dir }}
+          --index-files index.html
+          ${{ inputs.dir }}
+        fail: true
+        # A one-page site with no internal links is whole, not broken.
+        failIfEmpty: false
+        output: ${{ runner.temp }}/lychee.md

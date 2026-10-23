@@ -1,0 +1,54 @@
+name: default-headers
+description: >
+  Give every static asset the fleet's baseline security headers through the
+  Workers `_headers` file, without overriding anything a site sets itself.
+
+# The site conformance audit (gfrmin/ops#109) found no X-Content-Type-Options and
+# no frame protection on any Workers site. Each zone already sends HSTS from the
+# edge, so it is not repeated here. The box-served sites get the same three from
+# renavon-monorepo's deploy/host/caddy/security-headers.caddy, so the fleet has
+# one baseline whatever serves a site.
+#
+# `_headers` covers responses from the asset server only. A response a Worker
+# builds itself (blazon's /api/*, kaomoji's functions) sets its own headers.
+#
+# A header the site's own `_headers` already names, for any path, is left out
+# entirely. That is deliberate: Cloudflare joins two values for one header with
+# a comma, and "SAMEORIGIN, DENY" is not a frame policy a browser honours.
+
+inputs:
+  dir:
+    description: The build output directory (assets.directory in wrangler.jsonc).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Baseline security headers in _headers
+      shell: bash
+      env:
+        DIR: ${{ inputs.dir }}
+      run: |
+        set -euo pipefail
+        file="$DIR/_headers"
+        add=""
+        while IFS= read -r line; do
+          name=${line%%:*}
+          if [ -f "$file" ] && grep -qiE "^[[:space:]]+${name}:" "$file"; then
+            echo "kept: the site's _headers sets $name itself"
+          else
+            add="$add  $line"$'\n'
+          fi
+        done <<'HEADERS'
+        X-Content-Type-Options: nosniff
+        X-Frame-Options: SAMEORIGIN
+        Referrer-Policy: strict-origin-when-cross-origin
+        HEADERS
+        if [ -z "$add" ]; then
+          echo "ok: nothing to add"; exit 0
+        fi
+        # A blank line first, so the block cannot fuse with a site rule above it.
+        # Tested before the append, whose redirect creates the file.
+        sep=""; [ -f "$file" ] && sep=$'\n'
+        { printf '%s' "$sep"; echo "# site-kit default-headers: the fleet baseline"; echo "/*"; printf '%s' "$add"; } >> "$file"
+        echo "wrote $file:"; cat "$file"
