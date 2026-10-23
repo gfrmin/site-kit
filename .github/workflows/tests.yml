@@ -83,3 +83,79 @@ jobs:
           grep -q 'secrets: inherit' "$workflow" \
             || { echo "::error::--no-analytics ate more than the gate"; exit 1; }
           cd /tmp/nogate && npm install --no-audit --no-fund && npm run build
+
+      # The output check and the default headers, run from THIS checkout
+      # (./.github/actions/...), because worker-deploy.yml calls them @master and
+      # a PR must prove its own version before it becomes master. Each case runs
+      # on the template's real build, copied into the workspace (the link check
+      # resolves root-relative links against github.workspace).
+      - name: Stage the template's build for the output-check cases
+        run: |
+          set -euo pipefail
+          mkdir -p _check
+          cp -r /tmp/smoketest/dist _check/good
+          cp -r /tmp/smoketest/dist _check/broken
+          # A link to a page the build never produced: the check must refuse it.
+          sed -i 's#</body>#<a href="/no-such-page/">x</a></body>#' _check/broken/index.html
+          grep -q 'no-such-page' _check/broken/index.html
+
+      - name: "Output check: a whole build passes"
+        uses: ./.github/actions/check-build-output
+        with:
+          dir: _check/good
+          expect: "<title>"
+
+      - name: "Output check: a broken internal link fails"
+        id: broken
+        continue-on-error: true
+        uses: ./.github/actions/check-build-output
+        with:
+          dir: _check/broken
+
+      - name: "Output check: a home page without the expected text fails"
+        id: wrong
+        continue-on-error: true
+        uses: ./.github/actions/check-build-output
+        with:
+          dir: _check/good
+          expect: "this string is in no page anywhere"
+          check-links: "false"
+
+      - name: Both failure cases did fail
+        env:
+          BROKEN: ${{ steps.broken.outcome }}
+          WRONG: ${{ steps.wrong.outcome }}
+        run: |
+          set -euo pipefail
+          [ "$BROKEN" = failure ] || { echo "::error::a link to /no-such-page/ passed the output check ($BROKEN)"; exit 1; }
+          [ "$WRONG" = failure ] || { echo "::error::a missing expect string passed the output check ($WRONG)"; exit 1; }
+          echo "ok: both seeded defects were refused"
+
+      - name: "Default headers: written once, and a site's own value kept"
+        uses: ./.github/actions/default-headers
+        with:
+          dir: _check/good
+
+      - name: The headers file says what it should
+        run: |
+          set -euo pipefail
+          f=_check/good/_headers
+          for h in "X-Content-Type-Options: nosniff" "X-Frame-Options: SAMEORIGIN" "Referrer-Policy: strict-origin-when-cross-origin"; do
+            grep -qF "  $h" "$f" || { echo "::error::$f lacks $h"; cat "$f"; exit 1; }
+          done
+          mkdir -p _check/own && printf '/*\n  X-Frame-Options: DENY\n' > _check/own/_headers
+          echo "ok: baseline written"
+
+      - name: "Default headers: a site's own X-Frame-Options is not doubled"
+        uses: ./.github/actions/default-headers
+        with:
+          dir: _check/own
+
+      - name: The site's DENY stands alone
+        run: |
+          set -euo pipefail
+          n=$(grep -ci 'X-Frame-Options' _check/own/_headers)
+          [ "$n" = 1 ] && grep -q 'DENY' _check/own/_headers \
+            || { echo "::error::X-Frame-Options appears $n times"; cat _check/own/_headers; exit 1; }
+          grep -q 'nosniff' _check/own/_headers || { echo "::error::nosniff missing"; exit 1; }
+          echo "ok: the site's value kept, the rest added"
